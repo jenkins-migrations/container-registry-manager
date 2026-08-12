@@ -267,14 +267,10 @@ jobs:
           git tag -f "v${RELEASE_VERSION}"
           git push --force origin "refs/tags/v${RELEASE_VERSION}"
 
-      - name: Set Maven release version
-        env:
-          RELEASE_VERSION: ${{ steps.release-version.outputs.release_version }}
-        run: mvn -Dmaven.test.skip=true versions:set -DgenerateBackupPoms=false -DnewVersion="${RELEASE_VERSION}"
-
-      - name: Deploy release artifact
+      - name: Set Maven release version and deploy artifact
         env:
           MAVEN_SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+          RELEASE_VERSION: ${{ steps.release-version.outputs.release_version }}
         run: |
           if [[ -z "${MAVEN_SETTINGS_XML}" ]]; then
             echo "Skipping Maven deploy because MAVEN_SETTINGS_XML is not configured."
@@ -283,6 +279,7 @@ jobs:
           mkdir -p "${HOME}/.m2"
           printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
           chmod 600 "${HOME}/.m2/settings.xml"
+          mvn -Dmaven.test.skip=true versions:set -DgenerateBackupPoms=false -DnewVersion="${RELEASE_VERSION}"
           mvn -Dmaven.test.skip=true clean deploy
 
   acceptance-deploy:
