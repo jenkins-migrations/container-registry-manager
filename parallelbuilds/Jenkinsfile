@@ -1,0 +1,34 @@
+<![CDATA[
+// Source: https://github.com/jenkinsci/pipeline-examples (MIT License)
+// Test case: Parallel stages and jobs
+def labels = ['linux', 'windows']
+def builders = [:]
+
+for (x in labels) {
+    def label = x
+    builders[label] = {
+      node(label) {
+        stage("Build on ${label}") {
+          echo "Building on ${label}"
+          if (label == 'windows') {
+            bat 'echo Windows build'
+            bat 'dir'
+          } else {
+            sh 'echo Linux build'
+            sh 'ls -la'
+          }
+        }
+        stage("Test on ${label}") {
+          echo "Testing on ${label}"
+          if (label == 'windows') {
+            bat 'echo Windows test'
+          } else {
+            sh 'echo Linux test'
+          }
+        }
+      }
+    }
+}
+
+parallel builders
+    ]]>
