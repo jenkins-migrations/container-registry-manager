@@ -52,6 +52,7 @@ All marketplace actions are from verified GitHub-owned publishers and pinned to 
 - `actions/checkout@11d5960a326750d5838078e36cf38b85af677262` (v4)
 - `actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3` (v4)
 - `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02` (v4)
+- `actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093` (v4)
 
 ## Validation
 

@@ -175,6 +175,21 @@ jobs:
           java-version: '17'
           cache: maven
 
+      - name: Download classes artifact
+        # actions/download-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: classes
+          path: .
+
+      - name: Download coverage exec artifacts
+        # actions/download-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: coverage-exec-*
+          path: .
+          merge-multiple: true
+
       - name: Merge JaCoCo reports
         run: mvn -B -ntp -P merge-jacoco-reports validate
 
