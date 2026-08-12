@@ -55,7 +55,9 @@ jobs:
           echo "Development build version: ${dev_version}"
 
       - name: Maven package
-        run: mvn -Dintegration-tests.skip=true -Dbuild.number='${{ steps.versions.outputs.dev_version }}' clean package
+        env:
+          BUILD_NUMBER: ${{ steps.versions.outputs.dev_version }}
+        run: mvn -Dintegration-tests.skip=true -Dbuild.number="${BUILD_NUMBER}" clean package
 
       - name: Upload unit test reports
         if: always()
@@ -181,8 +183,10 @@ jobs:
     environment: development
     steps:
       - name: Deploy development artifact
+        env:
+          ARTIFACT_VERSION: ${{ needs.build.outputs.artifact_version }}
         run: |
-          jar_name="application-${{ needs.build.outputs.artifact_version }}.jar"
+          jar_name="application-${ARTIFACT_VERSION}.jar"
           echo "Deploy ${jar_name} to development."
           echo "Replace this step with the ApplicationToDev deployment implementation."
 
@@ -255,14 +259,18 @@ jobs:
           echo "Release version: ${release_version}"
 
       - name: Create and push release tag
+        env:
+          RELEASE_VERSION: ${{ steps.release-version.outputs.release_version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "v${{ steps.release-version.outputs.release_version }}"
-          git push --force origin "refs/tags/v${{ steps.release-version.outputs.release_version }}"
+          git tag -f "v${RELEASE_VERSION}"
+          git push --force origin "refs/tags/v${RELEASE_VERSION}"
 
       - name: Set Maven release version
-        run: mvn -Dmaven.test.skip=true versions:set -DgenerateBackupPoms=false -DnewVersion='${{ steps.release-version.outputs.release_version }}'
+        env:
+          RELEASE_VERSION: ${{ steps.release-version.outputs.release_version }}
+        run: mvn -Dmaven.test.skip=true versions:set -DgenerateBackupPoms=false -DnewVersion="${RELEASE_VERSION}"
 
       - name: Deploy release artifact
         run: mvn -Dmaven.test.skip=true clean deploy
@@ -276,8 +284,10 @@ jobs:
     environment: acceptance
     steps:
       - name: Deploy acceptance artifact
+        env:
+          RELEASE_VERSION: ${{ needs.release-publish.outputs.release_version }}
         run: |
-          jar_name="application-${{ needs.release-publish.outputs.release_version }}.jar"
+          jar_name="application-${RELEASE_VERSION}.jar"
           echo "Deploy ${jar_name} to acceptance."
           echo "Replace this step with the AApplicationToACC deployment implementation."
 
