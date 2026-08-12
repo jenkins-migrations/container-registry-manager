@@ -43,7 +43,8 @@ Migrated the repository's Jenkins pipelines to GitHub Actions workflows and arch
 | `SONAR_HOST_URL` | Repository/environment variable | Enterprise Maven CI/CD | SonarQube server URL. |
 | `SONAR_PROJECT_KEY` | Repository/environment variable | Enterprise Maven CI/CD | Required for quality gate polling. |
 | `GITHUB_TOKEN` | Automatic secret | Enterprise Maven CI/CD | Used by GitHub Actions for release tag pushes when `contents: write` is granted. |
-| Maven/Nexus credentials | Secrets | Enterprise Maven CI/CD, Kubernetes Plugin Parallel Testing | Configure Maven `settings.xml` or repository credentials before enabling deploy/publish jobs. |
+| `MAVEN_SETTINGS_XML` | Secret | Enterprise Maven CI/CD, Kubernetes Plugin Parallel Testing | Maven `settings.xml` content required for release deploys and incrementals publication. |
+| `PUBLISH_INCREMENTALS` | Repository/environment variable | Kubernetes Plugin Parallel Testing | Set to `true` to enable the expanded incrementals publication steps. |
 
 ## Action security
 
@@ -64,5 +65,5 @@ All marketplace actions are from verified GitHub-owned publishers and pinned to 
 
 1. Configure `development` and `acceptance` GitHub Environments with required reviewers to preserve Jenkins approval gates.
 2. Add SonarQube variables/secrets if SonarQube scanning should run.
-3. Add Maven/Nexus deployment credentials before enabling release or incrementals publication on protected branches.
+3. Add `MAVEN_SETTINGS_XML` with Maven/Nexus deployment credentials before enabling release or incrementals publication on protected branches.
 4. Replace the placeholder development and acceptance deployment echo commands with the repository's actual deployment implementation.

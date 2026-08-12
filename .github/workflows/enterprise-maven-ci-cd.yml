@@ -273,7 +273,16 @@ jobs:
         run: mvn -Dmaven.test.skip=true versions:set -DgenerateBackupPoms=false -DnewVersion="${RELEASE_VERSION}"
 
       - name: Deploy release artifact
-        run: mvn -Dmaven.test.skip=true clean deploy
+        env:
+          MAVEN_SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+        run: |
+          if [[ -z "${MAVEN_SETTINGS_XML}" ]]; then
+            echo "Skipping Maven deploy because MAVEN_SETTINGS_XML is not configured."
+            exit 0
+          fi
+          mkdir -p "${HOME}/.m2"
+          printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
+          mvn -Dmaven.test.skip=true clean deploy
 
   acceptance-deploy:
     name: Deploy to Acceptance

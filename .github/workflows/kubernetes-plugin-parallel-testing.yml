@@ -140,8 +140,13 @@ jobs:
         run: mvn -B -ntp -Dset.changelist -Dmaven.test.failure.ignore clean install
 
       - name: Prepare incrementals publication
+        env:
+          MAVEN_SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+          PUBLISH_INCREMENTALS: ${{ vars.PUBLISH_INCREMENTALS }}
         run: |
           if [[ "${PUBLISH_INCREMENTALS:-false}" == "true" ]]; then
+            mkdir -p "${HOME}/.m2"
+            printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
             mvn -B -ntp -DskipTests deploy
           else
             echo "Skipping incrementals publication; set PUBLISH_INCREMENTALS=true to enable."
@@ -220,8 +225,13 @@ jobs:
           cache: maven
 
       - name: Publish incrementals when enabled
+        env:
+          MAVEN_SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+          PUBLISH_INCREMENTALS: ${{ vars.PUBLISH_INCREMENTALS }}
         run: |
           if [[ "${PUBLISH_INCREMENTALS:-false}" == "true" ]]; then
+            mkdir -p "${HOME}/.m2"
+            printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
             mvn -B -ntp -DskipTests deploy
           else
             echo "Skipping incrementals publication; set PUBLISH_INCREMENTALS=true to enable."
