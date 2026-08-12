@@ -159,9 +159,7 @@ jobs:
   aggregate-coverage:
     name: aggregate coverage
     runs-on: ubuntu-latest
-    needs:
-      - kind-tests
-      - jdk17
+    needs: kind-tests
     steps:
       - name: Checkout repository
         # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
@@ -204,7 +202,9 @@ jobs:
   maybe-publish-incrementals:
     name: maybe publish incrementals
     runs-on: ubuntu-latest
-    needs: aggregate-coverage
+    needs:
+      - aggregate-coverage
+      - jdk17
     if: ${{ github.event_name != 'pull_request' }}
     steps:
       - name: Checkout repository
