@@ -1,0 +1,323 @@
+name: Enterprise Maven CI/CD
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build with unit testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      dev_version: ${{ steps.versions.outputs.dev_version }}
+      artifact_version: ${{ steps.versions.outputs.artifact_version }}
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 8
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+
+      - name: Determine development version
+        id: versions
+        shell: bash
+        run: |
+          dev_version="$(git rev-parse --short=8 HEAD 2>/dev/null || echo "${GITHUB_RUN_NUMBER}")"
+          pom_version="$(python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          pom = Path('pom.xml')
+          if not pom.exists():
+              print('0.0.0-SNAPSHOT')
+              raise SystemExit
+          root = ET.parse(pom).getroot()
+          ns = {'m': root.tag.split('}')[0].strip('{')} if root.tag.startswith('{') else {}
+          version = root.findtext('m:version', namespaces=ns) or root.findtext('version')
+          if not version:
+              parent = root.find('m:parent', namespaces=ns) or root.find('parent')
+              version = parent.findtext('m:version', namespaces=ns) if parent is not None and ns else parent.findtext('version') if parent is not None else '0.0.0-SNAPSHOT'
+          print(version or '0.0.0-SNAPSHOT')
+          PY
+          )"
+          echo "dev_version=${dev_version}" >> "${GITHUB_OUTPUT}"
+          echo "artifact_version=${pom_version}-${dev_version}" >> "${GITHUB_OUTPUT}"
+          echo "Development build version: ${dev_version}"
+
+      - name: Maven package
+        env:
+          BUILD_NUMBER: ${{ steps.versions.outputs.dev_version }}
+        run: mvn -Dintegration-tests.skip=true -Dbuild.number="${BUILD_NUMBER}" clean package
+
+      - name: Upload unit test reports
+        if: always()
+        # actions/upload-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unit-test-reports
+          path: '**/target/surefire-reports/TEST-*.xml'
+          if-no-files-found: ignore
+
+      - name: Upload build artifacts
+        if: success()
+        # actions/upload-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: application-jars
+          path: '**/target/*.jar'
+          if-no-files-found: ignore
+
+  integration-tests:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: build
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 8
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+
+      - name: Maven verify integration tests
+        run: mvn verify -Dunit-tests.skip=true
+
+      - name: Upload Cucumber reports
+        if: always()
+        # actions/upload-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cucumber-reports
+          path: '**/target/**/cucumber.json'
+          if-no-files-found: ignore
+
+  sonar-scan:
+    name: Sonar scan execution and quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: integration-tests
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+      SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 8
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+
+      - name: Run SonarQube scan when configured
+        shell: bash
+        run: |
+          if [[ -z "${SONAR_TOKEN}" || -z "${SONAR_HOST_URL}" ]]; then
+            echo "Skipping SonarQube scan because SONAR_TOKEN and/or SONAR_HOST_URL are not configured."
+            exit 0
+          fi
+          mvn verify sonar:sonar -Dintegration-tests.skip=true -Dmaven.test.failure.ignore=true \
+            -Dsonar.host.url="${SONAR_HOST_URL}" \
+            -Dsonar.token="${SONAR_TOKEN}"
+
+      - name: Check SonarQube quality gate when configured
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${SONAR_TOKEN}" || -z "${SONAR_HOST_URL}" || -z "${SONAR_PROJECT_KEY}" ]]; then
+            echo "Skipping SonarQube quality gate because SONAR_TOKEN, SONAR_HOST_URL, or SONAR_PROJECT_KEY is not configured."
+            exit 0
+          fi
+          status="PENDING"
+          for _ in 1 2 3; do
+            response="$(curl --fail --silent --user "${SONAR_TOKEN}:" \
+              "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}")" || {
+              echo "::error::Unable to fetch SonarQube quality gate status."
+              exit 1
+            }
+            status="$(python -c 'import json,sys; print(json.load(sys.stdin)["projectStatus"]["status"])' <<< "${response}")" || {
+              echo "::error::Unable to parse SonarQube quality gate status."
+              exit 1
+            }
+            echo "Quality gate status: ${status}"
+            [[ "${status}" != "PENDING" ]] && break
+            sleep 40
+          done
+          if [[ "${status}" == "PENDING" ]]; then
+            echo "::error::SonarQube quality gate did not finish before the retry limit."
+            exit 1
+          fi
+          if [[ "${status}" != "OK" ]]; then
+            echo "::error::SonarQube quality gate failed with status ${status}."
+            exit 1
+          fi
+
+  development-deploy:
+    name: Development deploy approval and deployment
+    runs-on: ubuntu-latest
+    needs:
+      - build
+      - sonar-scan
+    if: ${{ github.event_name != 'pull_request' }}
+    timeout-minutes: 5
+    environment: development
+    steps:
+      - name: Deploy development artifact
+        env:
+          ARTIFACT_VERSION: ${{ needs.build.outputs.artifact_version }}
+        run: |
+          jar_name="application-${ARTIFACT_VERSION}.jar"
+          echo "Deploy ${jar_name} to development."
+          echo "Replace this step with the ApplicationToDev deployment implementation."
+
+  dev-sanity-check:
+    name: DEV sanity check
+    runs-on: ubuntu-latest
+    needs: development-deploy
+    if: ${{ github.event_name != 'pull_request' }}
+    timeout-minutes: 4
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 8
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+
+      - name: Wait for deployment and run sanity test
+        run: |
+          sleep 45
+          mvn -Dtest=ApplicationSanityCheck_ITT surefire:test
+
+  release-publish:
+    name: Release and publish artifact
+    runs-on: ubuntu-latest
+    needs: dev-sanity-check
+    if: ${{ github.event_name != 'pull_request' && (github.ref_name == 'master' || github.ref_name == 'main') }}
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    outputs:
+      release_version: ${{ steps.release-version.outputs.release_version }}
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 8
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+
+      - name: Determine release version
+        id: release-version
+        shell: bash
+        run: |
+          git_version="$(git rev-parse --short=8 HEAD 2>/dev/null || echo "${GITHUB_RUN_NUMBER}")"
+          pom_version="$(python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = ET.parse(Path('pom.xml')).getroot()
+          ns = {'m': root.tag.split('}')[0].strip('{')} if root.tag.startswith('{') else {}
+          version = root.findtext('m:version', namespaces=ns) or root.findtext('version')
+          if not version:
+              parent = root.find('m:parent', namespaces=ns) or root.find('parent')
+              version = parent.findtext('m:version', namespaces=ns) if parent is not None and ns else parent.findtext('version') if parent is not None else ''
+          print(version)
+          PY
+          )"
+          release_version="${pom_version/-SNAPSHOT/.${git_version}}"
+          echo "release_version=${release_version}" >> "${GITHUB_OUTPUT}"
+          echo "Release version: ${release_version}"
+
+      - name: Create and push release tag
+        env:
+          RELEASE_VERSION: ${{ steps.release-version.outputs.release_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "v${RELEASE_VERSION}"
+          git push --force origin "refs/tags/v${RELEASE_VERSION}"
+
+      - name: Set Maven release version and deploy artifact
+        env:
+          MAVEN_SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+          RELEASE_VERSION: ${{ steps.release-version.outputs.release_version }}
+        run: |
+          if [[ -z "${MAVEN_SETTINGS_XML}" ]]; then
+            echo "Skipping Maven deploy because MAVEN_SETTINGS_XML is not configured."
+            exit 0
+          fi
+          mkdir -p "${HOME}/.m2"
+          printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
+          chmod 600 "${HOME}/.m2/settings.xml"
+          mvn -Dmaven.test.skip=true versions:set -DgenerateBackupPoms=false -DnewVersion="${RELEASE_VERSION}"
+          mvn -Dmaven.test.skip=true clean deploy
+
+  acceptance-deploy:
+    name: Deploy to Acceptance
+    runs-on: ubuntu-latest
+    needs: release-publish
+    if: ${{ github.event_name != 'pull_request' && (github.ref_name == 'master' || github.ref_name == 'main') }}
+    timeout-minutes: 3
+    environment: acceptance
+    steps:
+      - name: Deploy acceptance artifact
+        env:
+          RELEASE_VERSION: ${{ needs.release-publish.outputs.release_version }}
+        run: |
+          jar_name="application-${RELEASE_VERSION}.jar"
+          echo "Deploy ${jar_name} to acceptance."
+          echo "Replace this step with the AApplicationToACC deployment implementation."
+
+  acc-e2e-tests:
+    name: ACC E2E tests
+    runs-on: ubuntu-latest
+    needs: acceptance-deploy
+    if: ${{ github.event_name != 'pull_request' && (github.ref_name == 'master' || github.ref_name == 'main') }}
+    timeout-minutes: 4
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 8
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+
+      - name: Wait for deployment and run E2E test
+        run: |
+          sleep 45
+          mvn -Dtest=ApplicationE2E surefire:test

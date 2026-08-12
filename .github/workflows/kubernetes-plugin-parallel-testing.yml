@@ -1,0 +1,245 @@
+name: Kubernetes Plugin Parallel Testing
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  determine-splits:
+    name: Determine splits
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Determine Maven test shards
+        id: shards
+        run: echo 'shards=[0,1]' >> "${GITHUB_OUTPUT}"
+
+  kind-tests:
+    name: kind-${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    needs: determine-splits
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: ${{ fromJson(needs.determine-splits.outputs.shards) }}
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 17
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Generate shard include and exclude files
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/surefire-shards"
+          includes_file="${RUNNER_TEMP}/surefire-shards/includes.txt"
+          excludes_file="${RUNNER_TEMP}/surefire-shards/excludes.txt"
+          : > "${includes_file}"
+          : > "${excludes_file}"
+          if [[ -d src/test ]]; then
+            mapfile -t tests < <(find src/test -type f \( -name '*Test.java' -o -name '*IT.java' -o -name '*ITT.java' \) | sort)
+            for index in "${!tests[@]}"; do
+              if (( index % 2 == SHARD )); then
+                printf '%s\n' "${tests[index]}" >> "${includes_file}"
+              else
+                printf '%s\n' "${tests[index]}" >> "${excludes_file}"
+              fi
+            done
+          fi
+
+      - name: Run kind shard
+        env:
+          NUM: ${{ matrix.shard }}
+        run: |
+          includes_file="${RUNNER_TEMP}/surefire-shards/includes.txt"
+          excludes_file="${RUNNER_TEMP}/surefire-shards/excludes.txt"
+          if [[ -x ./kind.sh ]]; then
+            ./kind.sh -Penable-jacoco -Dsurefire.includesFile="${includes_file}" -Dsurefire.excludesFile="${excludes_file}"
+          else
+            mvn -B -ntp -Penable-jacoco -Dsurefire.includesFile="${includes_file}" -Dsurefire.excludesFile="${excludes_file}" test
+          fi
+          while IFS= read -r -d '' f; do
+            mv "$f" "${f/jacoco./jacoco-${NUM}.}"
+          done < <(find . -name jacoco.exec -print0)
+
+      - name: Upload test reports
+        if: always()
+        # actions/upload-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kind-${{ matrix.shard }}-test-reports
+          path: '**/target/surefire-reports/*.xml'
+          if-no-files-found: ignore
+
+      - name: Upload classes
+        if: ${{ matrix.shard == 0 }}
+        # actions/upload-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: classes
+          path: '**/target/classes/**'
+          if-no-files-found: ignore
+
+      - name: Upload coverage exec data
+        # actions/upload-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coverage-exec-${{ matrix.shard }}
+          path: '**/target/jacoco*.exec'
+          if-no-files-found: ignore
+
+      - name: Upload kind logs
+        if: always()
+        # actions/upload-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kindlogs-${{ matrix.shard }}
+          path: '**/kindlogs/**'
+          if-no-files-found: ignore
+
+  jdk17:
+    name: jdk17
+    runs-on: ubuntu-latest
+    needs: determine-splits
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 17
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Maven install
+        run: mvn -B -ntp -Dset.changelist -Dmaven.test.failure.ignore clean install
+
+      - name: Prepare incrementals publication
+        env:
+          MAVEN_SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+          PUBLISH_INCREMENTALS: ${{ vars.PUBLISH_INCREMENTALS }}
+        run: |
+          if [[ "${PUBLISH_INCREMENTALS:-false}" == "true" ]]; then
+            mkdir -p "${HOME}/.m2"
+            printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
+            chmod 600 "${HOME}/.m2/settings.xml"
+            mvn -B -ntp -DskipTests deploy
+          else
+            echo "Skipping incrementals publication; set PUBLISH_INCREMENTALS=true to enable."
+          fi
+
+      - name: Upload test reports
+        if: always()
+        # actions/upload-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: jdk17-test-reports
+          path: '**/target/surefire-reports/*.xml'
+          if-no-files-found: ignore
+
+  aggregate-coverage:
+    name: aggregate coverage
+    runs-on: ubuntu-latest
+    needs:
+      - kind-tests
+      - jdk17
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 17
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Download classes artifact
+        continue-on-error: true
+        # actions/download-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: classes
+          path: .
+
+      - name: Download coverage exec artifacts
+        continue-on-error: true
+        # actions/download-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: coverage-exec-*
+          path: .
+          merge-multiple: true
+
+      - name: Merge JaCoCo reports
+        run: mvn -B -ntp -P merge-jacoco-reports validate
+
+      - name: Upload JaCoCo coverage report
+        # actions/upload-artifact v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: jacoco-coverage-report
+          path: '**/jacoco/jacoco.xml'
+          if-no-files-found: ignore
+
+  maybe-publish-incrementals:
+    name: maybe publish incrementals
+    runs-on: ubuntu-latest
+    needs:
+      - aggregate-coverage
+      - jdk17
+    if: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - name: Checkout repository
+        # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Java 17
+        # actions/setup-java v4 pinned to the v4 tag commit for supply-chain safety.
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Publish incrementals when enabled
+        env:
+          MAVEN_SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+          PUBLISH_INCREMENTALS: ${{ vars.PUBLISH_INCREMENTALS }}
+        run: |
+          if [[ "${PUBLISH_INCREMENTALS:-false}" == "true" ]]; then
+            mkdir -p "${HOME}/.m2"
+            printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
+            chmod 600 "${HOME}/.m2/settings.xml"
+            mvn -B -ntp -DskipTests deploy
+          else
+            echo "Skipping incrementals publication; set PUBLISH_INCREMENTALS=true to enable."
+          fi
