@@ -195,7 +195,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: development-deploy
     if: ${{ github.event_name != 'pull_request' }}
-    timeout-minutes: 2
+    timeout-minutes: 4
     steps:
       - name: Checkout repository
         # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
@@ -282,6 +282,7 @@ jobs:
           fi
           mkdir -p "${HOME}/.m2"
           printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
+          chmod 600 "${HOME}/.m2/settings.xml"
           mvn -Dmaven.test.skip=true clean deploy
 
   acceptance-deploy:
@@ -305,7 +306,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: acceptance-deploy
     if: ${{ github.event_name != 'pull_request' && (github.ref_name == 'master' || github.ref_name == 'main') }}
-    timeout-minutes: 2
+    timeout-minutes: 4
     steps:
       - name: Checkout repository
         # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.

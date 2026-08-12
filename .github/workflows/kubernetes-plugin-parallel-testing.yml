@@ -147,6 +147,7 @@ jobs:
           if [[ "${PUBLISH_INCREMENTALS:-false}" == "true" ]]; then
             mkdir -p "${HOME}/.m2"
             printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
+            chmod 600 "${HOME}/.m2/settings.xml"
             mvn -B -ntp -DskipTests deploy
           else
             echo "Skipping incrementals publication; set PUBLISH_INCREMENTALS=true to enable."
@@ -164,7 +165,9 @@ jobs:
   aggregate-coverage:
     name: aggregate coverage
     runs-on: ubuntu-latest
-    needs: kind-tests
+    needs:
+      - kind-tests
+      - jdk17
     steps:
       - name: Checkout repository
         # actions/checkout v4 pinned to the v4 tag commit for supply-chain safety.
@@ -232,6 +235,7 @@ jobs:
           if [[ "${PUBLISH_INCREMENTALS:-false}" == "true" ]]; then
             mkdir -p "${HOME}/.m2"
             printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
+            chmod 600 "${HOME}/.m2/settings.xml"
             mvn -B -ntp -DskipTests deploy
           else
             echo "Skipping incrementals publication; set PUBLISH_INCREMENTALS=true to enable."
