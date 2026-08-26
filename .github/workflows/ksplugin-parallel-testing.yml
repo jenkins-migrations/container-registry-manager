@@ -1,0 +1,165 @@
+name: Kubernetes Plugin Parallel Testing
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WORKSPACE_TMP: ${{ runner.temp }}
+
+concurrency:
+  group: ksplugin-parallel-testing-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind-tests:
+    name: kind-${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Java 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Determine deterministic test split
+        env:
+          SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          : > "${RUNNER_TEMP}/includes.txt"
+          : > "${RUNNER_TEMP}/excludes.txt"
+          index=0
+          while IFS= read -r test_file; do
+            test_name="${test_file#*/java/}"
+            test_name="${test_name%.java}"
+            if (( index % 2 == SHARD - 1 )); then
+              printf '%s\n' "${test_name}" >> "${RUNNER_TEMP}/includes.txt"
+            else
+              printf '%s\n' "${test_name}" >> "${RUNNER_TEMP}/excludes.txt"
+            fi
+            index=$((index + 1))
+          done < <(find . -path '*/src/test/java/*' -name '*Test.java' -print | sort)
+      - name: Run kind tests
+        shell: bash
+        run: |
+          ./kind.sh -Penable-jacoco \
+            -Dsurefire.includesFile="${RUNNER_TEMP}/includes.txt" \
+            -Dsurefire.excludesFile="${RUNNER_TEMP}/excludes.txt"
+      - name: Rename coverage data
+        if: ${{ always() }}
+        env:
+          SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          while IFS= read -r file; do
+            mv "${file}" "${file%jacoco.exec}jacoco-${SHARD}.exec"
+          done < <(find . -name jacoco.exec -print)
+      - name: Upload classes
+        if: ${{ matrix.shard == 1 }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: classes
+          path: "**/target/classes/**"
+          if-no-files-found: error
+          retention-days: 5
+      - name: Upload coverage data
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-exec-${{ matrix.shard }}
+          path: "**/target/jacoco*.exec"
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Upload test reports and kind logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kind-results-${{ matrix.shard }}
+          path: |
+            **/target/surefire-reports/*.xml
+            ${{ runner.temp }}/kindlogs/
+          if-no-files-found: warn
+          retention-days: 5
+
+  jdk17:
+    name: JDK 17
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Java 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Build and test
+        shell: bash
+        run: mvn -B -ntp -Dset.changelist -Dmaven.test.failure.ignore clean install
+      - name: Locate Incrementals candidates
+        id: incrementals
+        shell: bash
+        run: |
+          echo "repository=$(mvn -Dset.changelist -Dexpression=settings.localRepository -q -DforceStdout help:evaluate)" >> "${GITHUB_OUTPUT}"
+          echo "version=$(mvn -Dset.changelist -Dexpression=project.version -q -DforceStdout help:evaluate)" >> "${GITHUB_OUTPUT}"
+      - name: Upload Incrementals candidates
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: incrementals-candidates
+          path: ${{ steps.incrementals.outputs.repository }}/**/${{ steps.incrementals.outputs.version }}/*${{ steps.incrementals.outputs.version }}*
+          if-no-files-found: warn
+          retention-days: 5
+      - name: Upload test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jdk17-test-reports
+          path: "**/target/surefire-reports/*.xml"
+          if-no-files-found: warn
+          retention-days: 5
+
+  aggregate-coverage:
+    name: Aggregate coverage
+    needs: [kind-tests, jdk17]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Java 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Download classes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: classes
+          path: .
+      - name: Download coverage data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-exec-*
+          path: .
+          merge-multiple: true
+      - name: Merge JaCoCo reports
+        shell: bash
+        run: mvn -B -ntp -P merge-jacoco-reports validate
+      - name: Upload merged coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jacoco-report
+          path: "**/jacoco/jacoco.xml"
+          if-no-files-found: error
+          retention-days: 5

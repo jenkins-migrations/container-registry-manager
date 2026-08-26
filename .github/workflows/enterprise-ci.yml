@@ -1,0 +1,254 @@
+name: Enterprise CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: enterprise-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MAVEN_VERSION: 3.3.9
+
+jobs:
+  build-test-scan:
+    name: Build, test, and scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      development-version: ${{ steps.versions.outputs.development-version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Java 8
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "8"
+      - name: Install Maven 3.3.9
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+            --output "${RUNNER_TEMP}/maven.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/maven.tar.gz" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
+      - name: Configure Maven credentials
+        env:
+          MAVEN_SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+        shell: bash
+        run: |
+          test -n "${MAVEN_SETTINGS_XML}"
+          mkdir -p "${HOME}/.m2"
+          printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
+      - name: Compute development version
+        id: versions
+        shell: bash
+        run: |
+          commit="$(git rev-parse HEAD)"
+          build_number="${commit:0:8}"
+          pom_version="$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)"
+          echo "development-version=${pom_version}-${build_number}" >> "${GITHUB_OUTPUT}"
+      - name: Build with unit testing
+        shell: bash
+        run: mvn -Dintegration-tests.skip=true -Dbuild.number="${GITHUB_SHA::8}" clean package
+      - name: Integration tests
+        shell: bash
+        run: mvn verify -Dunit-tests.skip=true
+      - name: Sonar scan
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        shell: bash
+        run: |
+          mvn verify sonar:sonar \
+            -Dintegration-tests.skip=true \
+            -Dmaven.test.failure.ignore=true \
+            -Dsonar.host.url="${SONAR_HOST_URL}" \
+            -Dsonar.token="${SONAR_TOKEN}"
+      - name: Wait for Sonar quality gate
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        shell: bash
+        run: |
+          report="$(find . -path '*/target/sonar/report-task.txt' -print -quit)"
+          test -n "${report}"
+          ce_task_url="$(sed -n 's/^ceTaskUrl=//p' "${report}")"
+          deadline=$((SECONDS + 120))
+          while (( SECONDS < deadline )); do
+            response="$(curl --fail --silent --user "${SONAR_TOKEN}:" "${ce_task_url}")"
+            status="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["task"]["status"])' <<<"${response}")"
+            if [[ "${status}" == "SUCCESS" ]]; then
+              analysis_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["task"]["analysisId"])' <<<"${response}")"
+              gate="$(curl --fail --silent --user "${SONAR_TOKEN}:" \
+                "${SONAR_HOST_URL}/api/qualitygates/project_status?analysisId=${analysis_id}")"
+              test "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["projectStatus"]["status"])' <<<"${gate}")" = "OK"
+              exit 0
+            fi
+            [[ "${status}" != "FAILED" && "${status}" != "CANCELED" ]] || break
+            sleep 10
+          done
+          echo "Sonar analysis or quality gate did not complete successfully" >&2
+          exit 1
+      - name: Upload build artifacts and test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: enterprise-build
+          path: |
+            **/target/*.jar
+            **/target/surefire-reports/TEST-*.xml
+            **/target/cucumber.json
+          if-no-files-found: warn
+          retention-days: 5
+
+  deploy-development:
+    name: Approve and deploy to development
+    needs: build-test-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: development
+    steps:
+      - name: Trigger ApplicationToDev
+        env:
+          JAR_NAME: application-${{ needs.build-test-scan.outputs.development-version }}.jar
+          JENKINS_URL: ${{ secrets.JENKINS_URL }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --user "${JENKINS_USER}:${JENKINS_API_TOKEN}" \
+            --request POST "${JENKINS_URL%/}/job/ApplicationToDev/buildWithParameters" \
+            --data-urlencode "jarName=${JAR_NAME}"
+
+  development-sanity:
+    name: Development sanity check
+    needs: deploy-development
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Java 8
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "8"
+      - name: Install Maven 3.3.9
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+            --output "${RUNNER_TEMP}/maven.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/maven.tar.gz" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
+      - name: Wait for deployment
+        shell: bash
+        run: sleep 45
+      - name: Run sanity test
+        shell: bash
+        run: mvn -Dtest=ApplicationSanityCheck_ITT surefire:test
+
+  release:
+    name: Release and publish artifact
+    needs: development-sanity
+    if: ${{ github.ref_name == 'master' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    outputs:
+      release-version: ${{ steps.release.outputs.release-version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Set up Java 8
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "8"
+      - name: Install Maven 3.3.9
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+            --output "${RUNNER_TEMP}/maven.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/maven.tar.gz" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
+      - name: Configure Maven credentials
+        env:
+          MAVEN_SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+        shell: bash
+        run: |
+          test -n "${MAVEN_SETTINGS_XML}"
+          mkdir -p "${HOME}/.m2"
+          printf '%s' "${MAVEN_SETTINGS_XML}" > "${HOME}/.m2/settings.xml"
+      - name: Tag and deploy release
+        id: release
+        shell: bash
+        run: |
+          pom_version="$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)"
+          if [[ "${pom_version}" == *-SNAPSHOT ]]; then
+            release_version="${pom_version%-SNAPSHOT}.${GITHUB_SHA::8}"
+          else
+            release_version="${pom_version}"
+          fi
+          echo "release-version=${release_version}" >> "${GITHUB_OUTPUT}"
+          git tag --force "v${release_version}"
+          git push --force origin "v${release_version}"
+          mvn -Dmaven.test.skip=true versions:set -DgenerateBackupPoms=false -DnewVersion="${release_version}"
+          mvn -Dmaven.test.skip=true clean deploy
+
+  deploy-acceptance:
+    name: Approve and deploy to acceptance
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: acceptance
+    steps:
+      - name: Trigger AApplicationToACC
+        env:
+          RELEASE_VERSION: ${{ needs.release.outputs.release-version }}
+          JENKINS_URL: ${{ secrets.JENKINS_URL }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --user "${JENKINS_USER}:${JENKINS_API_TOKEN}" \
+            --request POST "${JENKINS_URL%/}/job/AApplicationToACC/buildWithParameters" \
+            --data-urlencode "jarName=application-${RELEASE_VERSION}.jar" \
+            --data-urlencode "appVersion=${RELEASE_VERSION}"
+
+  acceptance-e2e:
+    name: Acceptance E2E tests
+    needs: deploy-acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Java 8
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "8"
+      - name: Install Maven 3.3.9
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+            --output "${RUNNER_TEMP}/maven.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/maven.tar.gz" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
+      - name: Wait for deployment
+        shell: bash
+        run: sleep 45
+      - name: Run acceptance E2E test
+        shell: bash
+        run: mvn -Dtest=ApplicationE2E surefire:test
