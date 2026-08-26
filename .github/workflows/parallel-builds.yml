@@ -1,0 +1,43 @@
+name: Parallel Builds
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test on ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux
+            os: ubuntu-latest
+          - label: windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build on Linux
+        if: ${{ matrix.label == 'linux' }}
+        shell: bash
+        run: |
+          echo "Linux build"
+          ls -la
+      - name: Build on Windows
+        if: ${{ matrix.label == 'windows' }}
+        shell: pwsh
+        run: |
+          Write-Output "Windows build"
+          Get-ChildItem
+      - name: Test on Linux
+        if: ${{ matrix.label == 'linux' }}
+        shell: bash
+        run: echo "Linux test"
+      - name: Test on Windows
+        if: ${{ matrix.label == 'windows' }}
+        shell: pwsh
+        run: Write-Output "Windows test"
